@@ -5,12 +5,16 @@
 #    sudo bash install.sh                         -> chạy bằng IP của VPS
 #    sudo bash install.sh seo.bigtreeland.vn      -> chạy bằng tên miền + HTTPS
 #    sudo bash install.sh seo.bigtreeland.vn ban@email.com
+#    sudo bash install.sh 2558                    -> chạy bằng IP, cổng riêng 2558
 #  Chạy lại lệnh này bất cứ lúc nào để cập nhật bản mới.
 # =============================================================
 set -euo pipefail
 
 DOMAIN="${1:-}"
 EMAIL="${2:-}"
+PORT=80
+if [[ "$DOMAIN" =~ ^[0-9]+$ ]]; then PORT="$DOMAIN"; DOMAIN=""; EMAIL=""; fi
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { echo "Cổng không hợp lệ: $PORT"; exit 1; }
 APP=cong-cu-seo
 WEBROOT=/var/www/$APP
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/chienn98/cong-cu-seo/main}"
@@ -63,12 +67,16 @@ fi
 AUTH_CONF=""
 [ -f "$HTPASS" ] && AUTH_CONF="auth_basic \"CONG CU SEO\"; auth_basic_user_file $HTPASS;"
 
-say "4/5 Cấu hình nginx"
+say "4/5 Cấu hình nginx (cổng $PORT)"
+if command -v ss >/dev/null; then
+  USED_BY="$(ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -v nginx | head -1 || true)"
+  [ -z "$USED_BY" ] || die "Cổng $PORT đang bị chương trình khác dùng: $USED_BY — chọn cổng khác."
+fi
 SERVER_NAME="${DOMAIN:-_}"
-LISTEN6=""; [ -s /proc/net/if_inet6 ] && LISTEN6="listen [::]:80;"
+LISTEN6=""; [ -s /proc/net/if_inet6 ] && LISTEN6="listen [::]:$PORT;"
 cat > "$SITE" <<NGINX
 server {
-    listen 80;
+    listen $PORT;
     $LISTEN6
     server_name $SERVER_NAME;
 
@@ -92,7 +100,7 @@ server {
 }
 NGINX
 ln -sf "$SITE" /etc/nginx/sites-enabled/$APP
-if [ -z "$DOMAIN" ] || [ ! -s /proc/net/if_inet6 ]; then
+if [ "$PORT" = 80 ] && { [ -z "$DOMAIN" ] || [ ! -s /proc/net/if_inet6 ]; }; then
   rm -f /etc/nginx/sites-enabled/default   # để trang chạy được bằng IP / tránh lỗi IPv6
 fi
 nginx -t >/dev/null 2>&1 || { nginx -t; die "Cấu hình nginx lỗi."; }
@@ -100,6 +108,7 @@ if systemctl is-active --quiet nginx 2>/dev/null; then systemctl reload nginx; e
 
 if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw allow 'Nginx Full' >/dev/null || true
+  [ "$PORT" = 80 ] || ufw allow "$PORT/tcp" >/dev/null || true
 fi
 
 say "5/5 HTTPS"
@@ -119,11 +128,15 @@ if [ -n "$DOMAIN" ]; then
     fi
   fi
 else
-  echo "   Bỏ qua (chưa có tên miền). Muốn có HTTPS: chạy lại với tên miền."
+  echo "   Bỏ qua (chưa có tên miền). Muốn có HTTPS: chạy lại với tên miền (dùng cổng 80/443)."
 fi
 
 IP="$(curl -fsS4 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 say "XONG!"
 if [ -n "$DOMAIN" ]; then echo "   Mở web:        https://$DOMAIN"; echo "   Trang quản trị: https://$DOMAIN/#cms";
-else echo "   Mở web:        http://$IP"; echo "   Trang quản trị: http://$IP/#cms"; fi
+else
+  HOSTPORT="$IP"; [ "$PORT" = 80 ] || HOSTPORT="$IP:$PORT"
+  echo "   Mở web:        http://$HOSTPORT"; echo "   Trang quản trị: http://$HOSTPORT/#cms"
+  [ "$PORT" = 80 ] || echo "   Nhớ mở cổng $PORT (TCP) trong Firewall/Security Group của nhà cung cấp VPS."
+fi
 echo "   Cập nhật bản mới: chạy lại đúng lệnh cài."
